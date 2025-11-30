@@ -23,20 +23,20 @@ export function Background() {
   const personas = [
     {
       id: "Zeus",
-      name: "Zeus — General AI",
-      desc: "General assistant with broad knowledge",
+      name: "Zeus - Business Strategist",
+      desc: "Delivers high-level analytics, leadership insights, and strategic business guidance.",
       image: zeusImg,
     },
     {
       id: "Athena",
-      name: "Athena — Researcher",
-      desc: "Careful, detailed explanations",
+      name: "Athena — Engineering Lead",
+      desc: "Specializes in code generation, debugging, and technical architecture for developers.",
       image: athenaImg,
     },
     {
       id: "Hermes",
-      name: "Hermes — Quick replies",
-      desc: "Short, fast answers",
+      name: "Hermes — Marketing Agent",
+      desc: "Generates ad copy, analyzes trends, and optimizes campaigns for the marketing team",
       image: hermesImg,
     },
   ];

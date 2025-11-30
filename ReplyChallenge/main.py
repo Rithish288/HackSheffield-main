@@ -32,6 +32,34 @@ load_dotenv(env_path)
 
 app = FastAPI()
 
+PERSONA_INSTRUCTIONS = {
+    "Zeus": (
+        "You are Zeus — an intelligent business strategist. Deliver high-level analytics, leadership insights, and strategic business guidance."
+    ),
+    "Athena": (
+        "You are Athena — the Engineering Lead. Specializes in code generation, debugging, and technical architecture for developers."
+    ),
+    "Hermes": (
+        "You are Hermes — a Marketing Agent. Generates ad copy, analyzes trends, and optimizes campaigns for the marketing team"
+    ),
+}
+
+def persona_ping_response(persona: str) -> str | None:
+    """Return a short canned personality response for a persona ping.
+
+    If persona exists in PERSONA_INSTRUCTIONS we return a short greeting
+    using the stored instructions. Otherwise return None.
+    """
+    if not persona:
+        return None
+    for p in PERSONA_INSTRUCTIONS.keys():
+        if p.lower() == persona.lower():
+            # provide a short, friendly greeting that uses the persona
+            instructions = PERSONA_INSTRUCTIONS[p].strip()
+            # Keep ping responses short and informative
+            return f"Hello — I am {p}. {instructions}"
+    return None
+
 # --- 1. NEW: Connection Manager for Multiplayer ---
 class ConnectionManager:
     def __init__(self):
@@ -385,6 +413,14 @@ async def websocket_endpoint(websocket: WebSocket):
                 target_persona = None
                 if isinstance(parsed, dict):
                     target_persona = parsed.get("targetPersona")
+                    if target_persona:
+                        for p in PERSONA_INSTRUCTIONS.keys():
+                            if p.lower() == target_persona.lower():
+                                target_persona = p  # normalize casing 
+                                break
+                    else:
+                        target_persona = None  # not found
+
 
                 message_text_for_ai = message_text
                 if not target_persona:
@@ -453,24 +489,103 @@ async def websocket_endpoint(websocket: WebSocket):
                         fact_lines.append(f"- {ft}: {val}" + (f" (normalized: {norm})" if norm else ""))
                     fact_context = "Known facts about the user:\n" + "\n".join(fact_lines)
 
-                # 6. Call OpenAI API with memory context included as a system message
+                
+                # 6. Short-circuit: if the user just 'pings' the persona (e.g., @Zeus or '@Zeus ping')
+                # respond with the persona's canned instruction instead of calling OpenAI.
+                if target_persona and message_text_for_ai.strip().lower() in ("", "ping"):
+                    print(f"ℹ️ Persona ping detected for {target_persona} — sending canned response")
+                    ai_text = persona_ping_response(target_persona) or (f"Hello, I am {target_persona}.")
+
+                    # Broadcast the canned persona response and store in DB if possible
+                    try:
+                        print(f"💾 Saving canned persona response to DB for persona {target_persona}")
+                        loop = __import__('asyncio').get_event_loop()
+                        if request_id:
+                            await loop.run_in_executor(
+                                executor,
+                                update_request_response,
+                                request_id,
+                                ai_text,
+                                0,
+                                {"persona_ping": True},
+                            )
+                        else:
+                            await loop.run_in_executor(
+                                executor,
+                                log_chat_to_db,
+                                message_text_for_ai,
+                                ai_text,
+                                0,
+                                session_id,
+                                {"persona_ping": True},
+                            )
+                    except Exception as e:
+                        print(f"⚠ Failed to persist canned persona response: {e}")
+
+                    await manager.broadcast_json({"type": "ai", "text": ai_text, "request_id": request_id, "username": target_persona})
+                    continue
+
+               # 6. Call OpenAI API with memory context included as a system message
                 print(f"🤖 Calling OpenAI API for persona: {target_persona}...")
-                messages_for_ai = []
-                # prefer to place structured facts first so the AI can act on them
+                
+                # --- START OF FIX: Construct the full system prompt and message list ---
+                
+                # 1. Get the base instruction for the target persona
+                base_instruction = PERSONA_INSTRUCTIONS.get(target_persona)
+
+                if not base_instruction:
+                    ai_text = f"Error: Persona '{target_persona}' not found or configured."
+                    # Broadcast error and continue to cleanup/end block
+                    await manager.broadcast_json({"type": "system", "text": ai_text})
+                    continue 
+
+                # 2. Construct the full system prompt
+                # Combine the persona's core instructions with gathered context (facts/memory)
+                system_prompt_parts = [base_instruction]
                 if fact_context:
-                    messages_for_ai.append({"role": "system", "content": fact_context})
+                    system_prompt_parts.append("\n\n" + fact_context)
                 if memory_context:
-                    messages_for_ai.append({"role": "system", "content": memory_context})
-                messages_for_ai.append({"role": "user", "content": message_text_for_ai})
+                    system_prompt_parts.append("\n\n" + memory_context)
+                
+                full_system_prompt = "\n".join(system_prompt_parts)
+                
+                # 3. Retrieve recent chat history for conversation context (Recommended)
+                history_messages = []
+                try:
+                    # Get last 5 messages, excluding the current one
+                    history_rows = get_session_history(session_id, limit=5)
+                    # Map history into OpenAI format. Filter to only 'user' and 'assistant' roles.
+                    history_messages = [
+                        {"role": "user" if r.get("is_user_message") else "assistant", "content": r.get("content")}
+                        for r in history_rows 
+                        if r.get("is_user_message") is not None and r.get("content")
+                    ]
+                except Exception as e:
+                    print(f"⚠ Failed to retrieve chat history: {e}")
+                    
+                # 4. Construct the final message list for the API call
+                messages_for_ai = [
+                    # CRITICAL: This sets the persona!
+                    {"role": "system", "content": full_system_prompt},
+                    # Add recent history for context
+                    *history_messages,
+                    # Add the current user query
+                    {"role": "user", "content": message_text_for_ai},
+                ]
+                
+                # --- END OF FIX ---
 
                 completion = client.chat.completions.create(
                     model="gpt-4o",
-                    messages=messages_for_ai
+                    messages=messages_for_ai, # Now correctly using the list with System Role
+                    temperature=0.7 # Add a temperature to slightly increase creativity/persona adherence
                 )
+                
+                # ... (continuation of the try block)
                 
                 ai_text = completion.choices[0].message.content
                 tokens = completion.usage.total_tokens
-                full_metadata = completion.model_dump()
+                full_metadata = completion.model_dump() # Capture all response data
                 
                 print(f"✓ OpenAI Response received ({tokens} tokens)")
 
@@ -486,7 +601,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         request_id,
                         ai_text,
                         tokens,
-                        full_metadata,
+                        {"persona": target_persona, "metadata": full_metadata}, # Store persona and metadata
                     )
                 else:
                     # fallback to legacy logger
@@ -497,8 +612,10 @@ async def websocket_endpoint(websocket: WebSocket):
                         ai_text,
                         tokens,
                         session_id,
-                        full_metadata,
+                        {"persona": target_persona, "metadata": full_metadata},
                     )
+
+                # ... (rest of the code for memory and broadcast is fine)
 
                 # Persist the user's message as a memory vector for future recall
                 try:
