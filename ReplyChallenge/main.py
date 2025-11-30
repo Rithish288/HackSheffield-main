@@ -16,7 +16,14 @@ from ReplyChallenge.database.service import (
     verify_database_connection,
     create_request_entry,
     update_request_response,
+    add_memory,
+    find_similar_memories,
     get_session_history,
+    add_fact,
+    get_facts_for_user,
+    upsert_fact,
+    delete_fact,
+    update_fact,
 )
 
 # Load env vars from ReplyChallenge/.env
@@ -127,6 +134,41 @@ async def health():
         "active_users": len(manager.active_connections)
     })
 
+
+@app.get("/api/facts")
+async def api_get_facts(username: Optional[str] = None, user_id: Optional[str] = None):
+    """Return facts for a user either by username or user_id."""
+    try:
+        facts = get_facts_for_user(user_id, username)
+        # If the backend returns an empty list it might mean either no facts
+        # exist or the database/table isn't present. To help operators, return
+        # a friendly payload and let the UI decide how to present it.
+        if isinstance(facts, list) and len(facts) == 0:
+            return JSONResponse({"ok": True, "data": [], "note": "no facts found or facts table missing"})
+        return JSONResponse({"ok": True, "data": facts})
+    except Exception as e:
+        # Unexpected errors should be reported but keep the response JSON
+        # friendly rather than returning raw DB exceptions.
+        return JSONResponse({"ok": False, "error": "Internal server error fetching facts"}, status_code=500)
+
+
+@app.delete("/api/facts/{fact_id}")
+async def api_delete_fact(fact_id: str):
+    try:
+        result = delete_fact(fact_id)
+        return JSONResponse({"ok": True, "result": getattr(result, 'data', None)})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+@app.patch("/api/facts/{fact_id}")
+async def api_update_fact(fact_id: str, payload: dict):
+    try:
+        result = update_fact(fact_id, payload)
+        return JSONResponse({"ok": True, "result": getattr(result, 'data', None)})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
 @app.on_event("startup")
 async def startup_event():
     """Verify database connection on startup"""
@@ -150,26 +192,93 @@ async def websocket_endpoint(websocket: WebSocket):
     
     print(f"\n🔗 New Multiplayer Connection. Total Users: {len(manager.active_connections)}")
 
-    # Send session history to the newly connected client so they start with
-    # the existing conversation state. We only send to this websocket.
     try:
-        history = get_session_history(session_id)
-        import json
-        # Sort history by created_at if available
-        history_sorted = sorted(history, key=lambda r: r.get("created_at") or "") if history else []
-        for row in history_sorted:
-            # send the user prompt first
-            prompt = row.get("prompt")
-            if prompt is not None:
-                await websocket.send_text(json.dumps({"type": "message", "text": prompt, "username": row.get("username"), "request_id": row.get("id"), "created_at": row.get("created_at")}))
-            # if we have an AI response, send that too referencing the same id
-            response = row.get("response")
-            if response is not None:
-                await websocket.send_text(json.dumps({"type": "ai", "text": response, "request_id": row.get("id"), "created_at": row.get("updated_at") or row.get("created_at")}))
-    except Exception as e:
-        print(f"⚠ Failed to load session history for new connection: {e}")
+        # helper: lightweight regex-based fact extraction (MVP)
+        def parse_date_string(s: str):
+            from datetime import datetime
+            s = s.strip()
+            # common formats to try
+            fmts = [
+                "%Y-%m-%d",
+                "%d/%m/%Y",
+                "%d-%m-%Y",
+                "%B %d, %Y",
+                "%b %d, %Y",
+                "%d %B %Y",
+                "%d %b %Y",
+                "%B %d",
+                "%b %d",
+            ]
+            for f in fmts:
+                try:
+                    dt = datetime.strptime(s, f)
+                    # if format didn't include year (e.g. '%B %d') we leave year as-is
+                    return dt.date().isoformat()
+                except Exception:
+                    continue
+            return None
 
-    try:
+        def extract_facts_from_text(text: str):
+            import re
+            candidates = []
+
+            # basic birthday patterns
+            # examples: "my birthday is July 29, 1993", "I was born on 29/07/1993"
+            patterns = [
+                r"(?:my )?birthday is (?:on )?([A-Za-z0-9,\-\s]+)",
+                r"(?:i was )?born on ([A-Za-z0-9,\-/\s]+)",
+                r"birthday: (\d{4}-\d{2}-\d{2})",
+                r"born (?:on )?([A-Za-z0-9,\-/\s]+)",
+            ]
+
+            for p in patterns:
+                m = re.search(p, text, re.I)
+                if m:
+                    raw = m.group(1).strip()
+                    norm = parse_date_string(raw)
+                    candidates.append({
+                        "type": "birthday",
+                        "value": raw,
+                        "normalized": norm,
+                        "confidence": 0.95,  # regex-derived high precision
+                        "source": "regex",
+                    })
+
+            # Additional simple facts (name/intro) — e.g. "I'm Alice" or "I am Alice"
+            m = re.search(r"^i(?:'| )?m\s+([A-Z][a-zA-Z\-']+)", text, re.I)
+            if m:
+                name = m.group(1)
+                candidates.append({
+                    "type": "name",
+                    "value": name,
+                    "normalized": name,
+                    "confidence": 0.8,
+                    "source": "regex",
+                })
+
+            return candidates
+
+        def is_explicit_save(text: str) -> bool:
+            """Detect explicit user intent to save/remember info.
+            Match phrases like 'remember that', 'please remember', 'save my', 'don't forget'.
+            """
+            import re
+            checks = [
+                r"\bremember that\b",
+                r"\bplease remember\b",
+                r"\bsave my\b",
+                r"\bdon't forget\b",
+                r"\bdo not forget\b",
+                r"\bremember my\b",
+                r"\bstore my\b",
+                r"\bcan you remember\b",
+            ]
+            t = text.lower()
+            for c in checks:
+                if re.search(c, t):
+                    return True
+            return False
+
         while True:
             # 3. Receive User Input
             data = await websocket.receive_text()
@@ -194,7 +303,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     manager.set_username(websocket, username)
 
                 # Broadcast a structured typing presence event to other clients
-                # exclude origin so the sender doesn't receive their own typing events
+                # do not echo typing events back to the origin websocket
                 await manager.broadcast_json({"type": "typing", "username": username, "isTyping": is_typing}, exclude=websocket)
                 # never forward typing events to the AI
                 continue
@@ -221,23 +330,45 @@ async def websocket_endpoint(websocket: WebSocket):
                 message_text = str(data).strip()
                 username = manager.get_username(websocket) or "unknown"
 
-            # Create a DB entry for this user message so we can update it later
-            # with the AI response. Insert in the DB before broadcasting so
-            # other clients get a stable request_id to reference.
-            db_row = None
+            # Create DB entry for the user message (requests table). This
+            # returns a request_id we can use to update later when the AI reply
+            # arrives and also to link the message to stored records.
+            request_row = None
             try:
-                db_row = create_request_entry(prompt=message_text, session_id=session_id, username=username)
+                request_row = create_request_entry(prompt=message_text, session_id=session_id, username=username)
             except Exception as e:
-                print(f"⚠ Failed to create DB entry for prompt: {e}")
+                print(f"⚠ Failed to create request entry: {e}")
 
-            request_id = None
-            if db_row and isinstance(db_row, dict):
-                request_id = db_row.get("id")
+            request_id = request_row.get("id") if request_row and isinstance(request_row, dict) else None
+
+            # run a lightweight extractor for structured facts (MVP) and persist
+            try:
+                extracted = extract_facts_from_text(message_text)
+                explicit_save = is_explicit_save(message_text)
+                for f in extracted:
+                    # only persist structured facts if the user explicitly asked us
+                    # to remember/save them (privacy-first behaviour)
+                    if explicit_save:
+                        try:
+                            upsert_fact(None, username, request_id, f["type"], f["value"], f.get("normalized"), f.get("confidence"), {"source": f.get("source")})
+                            print(f"✓ Explicitly saved fact {f['type']}={f['value']} for {username}")
+                            # Confirm to the origin that we saved the fact
+                            try:
+                                await websocket.send_text(json.dumps({"type": "system", "text": f"Saved: {f['type']} = {f['value']}"}))
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            print(f"⚠ Failed to persist fact: {e}")
+                    else:
+                        # If not explicit, we only extract candidates but do not
+                        # persist them as stored user facts (MVP privacy choice).
+                        print(f"ℹ️ Detected candidate fact but not saving (no explicit save): {f['type']}={f['value']}")
+            except Exception as e:
+                print(f"⚠ Fact extraction failed: {e}")
 
             # Broadcast the message as a structured JSON event so frontends render it
-            # as a chat bubble immediately and can link to the DB record. Do NOT
-            # send the message back to the originating websockets (they already
-            # have a local echo). This prevents duplicates appearing on the sender.
+            # as a chat bubble immediately. Do not send back to the origin (the
+            # sender already has a local echo).
             await manager.broadcast_json({"type": "message", "text": message_text, "username": username, "request_id": request_id}, exclude=websocket)
 
             if not client:
@@ -246,44 +377,95 @@ async def websocket_endpoint(websocket: WebSocket):
                 await manager.broadcast_json({"type": "system", "text": error_msg})
                 continue
             
-            # Only call the AI if this message explicitly targets a persona
-            # either via parsed 'targetPersona' or an @mention at the start.
-            target_persona = None
-            if isinstance(parsed, dict):
-                target_persona = parsed.get("targetPersona")
-
-            if not target_persona:
-                # look for leading @persona syntax in the text (e.g. "@Athena hello")
-                mention_match = None
-                try:
-                    import re
-
-                    mention_match = re.match(r"^@([A-Za-z0-9_-]+)\s+(.+)$", message_text)
-                except Exception:
-                    mention_match = None
-
-                if mention_match:
-                    target_persona = mention_match.group(1)
-                    # update message_text to be the content only when calling AI
-                    message_text_for_ai = mention_match.group(2) or ""
-                else:
-                    message_text_for_ai = message_text
-            else:
-                message_text_for_ai = message_text
-
-            # If no target persona is present, we do not call the AI.
-            if not target_persona:
-                print("ℹ️  No target persona detected — skipping OpenAI call for this message")
-                continue
-
             try:
-                # 5. Call OpenAI API
+                # Determine if this message should reach an AI persona. We only
+                # call the AI when the message explicitly targets a persona via
+                # parsed.targetPersona or a leading @mention. This avoids sending
+                # unrelated chat to OpenAI.
+                target_persona = None
+                if isinstance(parsed, dict):
+                    target_persona = parsed.get("targetPersona")
+
+                message_text_for_ai = message_text
+                if not target_persona:
+                    # look for leading @persona syntax
+                    try:
+                        import re
+
+                        m = re.match(r"^@([A-Za-z0-9_-]+)\s+(.+)$", message_text)
+                        if m:
+                            target_persona = m.group(1)
+                            message_text_for_ai = m.group(2) or ""
+                    except Exception:
+                        m = None
+
+                if not target_persona:
+                    print("ℹ️  No target persona detected — skipping OpenAI call for this message")
+                    # We'll still optionally persist the user's message to memory,
+                    # but we won't call the OpenAI API.
+                    # Persist a memory embedding for this message (best effort)
+                    try:
+                        if client and message_text_for_ai:
+                            emb = client.embeddings.create(model="text-embedding-3-small", input=message_text_for_ai)
+                            embedding_vector = emb.data[0].embedding if hasattr(emb.data[0], 'embedding') else emb.data[0]['embedding']
+                            # don't block: run in executor
+                            loop = __import__('asyncio').get_event_loop()
+                            loop.run_in_executor(executor, add_memory, message_text_for_ai, embedding_vector, None)
+                    except Exception as e:
+                        print(f"⚠️ Memory embedding failed: {e}")
+                    continue
+
+                # 5. Before calling the AI, compute an embedding of the query and
+                # search the memory table for similar items to provide context.
+                memories = []
+                embedding_vector = None
+                try:
+                    emb = client.embeddings.create(model="text-embedding-3-small", input=message_text_for_ai)
+                    embedding_vector = emb.data[0].embedding if hasattr(emb.data[0], 'embedding') else emb.data[0]['embedding']
+                    # find similar memories (best effort)
+                    memories = find_similar_memories(embedding_vector, match_count=5)
+                except Exception as e:
+                    print(f"⚠️ Warning computing/querying embeddings: {e}")
+
+                # Construct a system prompt block containing the relevant memories
+                memory_context = ""
+                if memories:
+                    memory_lines = []
+                    for m in memories:
+                        similarity = m.get("similarity")
+                        content = m.get("content")
+                        memory_lines.append(f"- ({similarity:.3f}) {content}")
+                    memory_context = "Relevant memories:\n" + "\n".join(memory_lines)
+
+                # also include structured facts (birthdays, name, etc.) if present
+                try:
+                    facts = get_facts_for_user(None, username)
+                except Exception:
+                    facts = []
+
+                fact_context = ""
+                if facts:
+                    fact_lines = []
+                    for f in facts:
+                        ft = f.get("fact_type")
+                        val = f.get("value")
+                        norm = f.get("normalized_value")
+                        fact_lines.append(f"- {ft}: {val}" + (f" (normalized: {norm})" if norm else ""))
+                    fact_context = "Known facts about the user:\n" + "\n".join(fact_lines)
+
+                # 6. Call OpenAI API with memory context included as a system message
                 print(f"🤖 Calling OpenAI API for persona: {target_persona}...")
-                # NOTE: We keep the minimal call shape. You may want to inject
-                # persona-specific system prompts or different models per persona.
+                messages_for_ai = []
+                # prefer to place structured facts first so the AI can act on them
+                if fact_context:
+                    messages_for_ai.append({"role": "system", "content": fact_context})
+                if memory_context:
+                    messages_for_ai.append({"role": "system", "content": memory_context})
+                messages_for_ai.append({"role": "user", "content": message_text_for_ai})
+
                 completion = client.chat.completions.create(
                     model="gpt-4o",
-                    messages=[{"role": "user", "content": message_text_for_ai}]
+                    messages=messages_for_ai
                 )
                 
                 ai_text = completion.choices[0].message.content
@@ -292,11 +474,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 
                 print(f"✓ OpenAI Response received ({tokens} tokens)")
 
-                # 6. Save to Supabase (Background Thread) — update the row we
-                # created earlier with AI response and tokens, or fallback to
-                # the legacy logger if we don't have a request_id.
-                print(f"💾 Saving AI response to database...")
+                # 6. Save response to DB and persist memory for the user's message
+                print(f"💾 Saving AI response to database and storing memory...")
                 loop = __import__('asyncio').get_event_loop()
+
+                # Update the requests row that we created earlier with the AI response
                 if request_id:
                     await loop.run_in_executor(
                         executor,
@@ -307,7 +489,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         full_metadata,
                     )
                 else:
-                    # fallback unless supabase is down — preserves previous behaviour
+                    # fallback to legacy logger
                     await loop.run_in_executor(
                         executor,
                         log_chat_to_db,
@@ -318,10 +500,16 @@ async def websocket_endpoint(websocket: WebSocket):
                         full_metadata,
                     )
 
+                # Persist the user's message as a memory vector for future recall
+                try:
+                    if embedding_vector:
+                        await loop.run_in_executor(executor, add_memory, message_text_for_ai, embedding_vector, None)
+                except Exception as e:
+                    print(f"⚠️ Failed to persist memory: {e}")
+
                 # 7. BROADCAST AI RESPONSE (So everyone sees the answer)
                 print(f"📤 Broadcasting response ({len(ai_text)} chars)")
-                # Broadcast AI response and reference the original request_id where possible
-                await manager.broadcast_json({"type": "ai", "text": ai_text, "request_id": request_id})
+                await manager.broadcast_json({"type": "ai", "text": ai_text, "request_id": request_id, "username": target_persona})
 
             except Exception as e:
                 error_msg = f"Error processing request: {str(e)}"

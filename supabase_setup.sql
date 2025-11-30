@@ -41,3 +41,23 @@ CREATE POLICY "Allow all operations" ON requests
   WITH CHECK (TRUE);
 
 -- Done! Your table is ready to use.
+
+-- Facts table (structured extracted memories / user facts)
+CREATE TABLE IF NOT EXISTS facts (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES auth.users ON DELETE SET NULL,
+  username TEXT,
+  request_id UUID REFERENCES requests(id) ON DELETE SET NULL,
+  fact_type TEXT NOT NULL,
+  value TEXT NOT NULL,
+  normalized_value TEXT,
+  confidence NUMERIC,
+  metadata JSONB,
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::TEXT, NOW()) NOT NULL,
+  updated_at TIMESTAMP WITH TIME ZONE DEFAULT TIMEZONE('utc'::TEXT, NOW()) NOT NULL,
+  active BOOLEAN DEFAULT TRUE
+);
+
+CREATE INDEX IF NOT EXISTS idx_facts_user_id ON facts(user_id);
+CREATE INDEX IF NOT EXISTS idx_facts_username ON facts(username);
+CREATE INDEX IF NOT EXISTS idx_facts_fact_type ON facts(fact_type);

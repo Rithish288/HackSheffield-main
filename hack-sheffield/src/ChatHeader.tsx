@@ -2,6 +2,7 @@ export function ChatHeader({
   connectionStatus,
   currentPersona,
   onOpenPersonaPicker,
+  onOpenFacts,
   personaImage,
 }: any) {
   return (
@@ -33,6 +34,13 @@ export function ChatHeader({
           <span className="text-xs sm:text-xs lg:text-sm font-semibold whitespace-nowrap">
             {currentPersona}
           </span>
+        </button>
+
+        <button
+          onClick={onOpenFacts}
+          className="flex items-center gap-2 px-3 py-2 bg-white/10 text-white rounded-full border border-white/10 hover:bg-white/20 transition-all"
+        >
+          <span className="text-xs sm:text-sm font-medium">Memories</span>
         </button>
 
         <div className="text-xs sm:text-sm flex items-center gap-1.5 sm:gap-2">

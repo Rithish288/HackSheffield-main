@@ -146,10 +146,11 @@ export function useWebSocket(
           // (frontend components can use these fields if desired)
           parsedMsg.request_id && (parsedMsg.request_id = parsedMsg.request_id);
           parsedMsg.created_at && (parsedMsg.created_at = parsedMsg.created_at);
-        } else if (messageType === "ai") {
-          messageText = String(parsedMsg.text || "");
-          messageSender = "ai";
-          messageUsername = null;
+          } else if (messageType === "ai") {
+            messageText = String(parsedMsg.text || "");
+            messageSender = "ai";
+            // front-end should show which persona produced this response
+            messageUsername = parsedMsg.username || null;
         } else if (messageType === "system") {
           messageText = String(parsedMsg.text || "");
           messageSender = "server";

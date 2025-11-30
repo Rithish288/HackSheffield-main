@@ -7,6 +7,7 @@ import { MessageList } from "./MessageList.tsx";
 import { ChatInput } from "./ChatInput";
 import { useWebSocket } from "./WebSocket";
 import LoginPrompt from "./LoginPrompt";
+import FactsPanel from "./FactsPanel";
 import { UserList } from "./UserList";
 
 export function Background() {
@@ -14,6 +15,7 @@ export function Background() {
   const [usernameSubmitted, setUsernameSubmitted] = useState(false);
   const [currentPersona] = useState("AI Descriptions");
   const [showPersonaPicker, setShowPersonaPicker] = useState(false);
+  const [showFactsPanel, setShowFactsPanel] = useState(false);
   const [message, setMessage] = useState("");
   const [connectionError, setConnectionError] = useState("");
   const messagesContainerRef = useRef(null);
@@ -89,6 +91,7 @@ export function Background() {
             connectionStatus={connectionStatus}
             currentPersona={currentPersona}
             onOpenPersonaPicker={() => setShowPersonaPicker(true)}
+            onOpenFacts={() => setShowFactsPanel(true)}
             personaImage={getPersonaImage(currentPersona)}
           />
 
@@ -128,6 +131,25 @@ export function Background() {
                 <div className="mt-4 sm:mt-6 lg:mt-8 text-center">
                   <button
                     onClick={() => setShowPersonaPicker(false)}
+                    className="px-5 py-2.5 sm:px-6 sm:py-3 text-sm sm:text-base bg-gray-200 text-gray-700 font-semibold rounded-full hover:bg-gray-300 transition-all shadow-md hover:shadow-lg"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {showFactsPanel && (
+            <div className="fixed inset-0 bg-black bg-opacity-60 backdrop-blur-sm flex items-center justify-center z-50 animate-in fade-in duration-200 p-4">
+              <div className="bg-white rounded-2xl p-4 sm:p-6 lg:p-8 max-w-3xl w-full max-h-[90vh] overflow-y-auto shadow-2xl transform animate-in zoom-in-95 duration-200">
+                <h3 className="text-xl sm:text-2xl lg:text-3xl font-bold text-center mb-2 bg-linear-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">Your Memories</h3>
+                <div className="text-sm sm:text-base text-gray-600 mb-4">These are structured facts we've saved for your account. You can remove them if you'd like.</div>
+                {/* Lazy load the FactsPanel so we don't fetch until opened */}
+                <FactsPanel username={currentUsername} />
+                <div className="mt-4 sm:mt-6 lg:mt-8 text-center">
+                  <button
+                    onClick={() => setShowFactsPanel(false)}
                     className="px-5 py-2.5 sm:px-6 sm:py-3 text-sm sm:text-base bg-gray-200 text-gray-700 font-semibold rounded-full hover:bg-gray-300 transition-all shadow-md hover:shadow-lg"
                   >
                     Close
