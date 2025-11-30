@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environments
+venv/
+.env
+
+# IDE stuff
+.idea/
+
+# OS files
+.DS_Store
+
+# Reply Challenge API keys, etc.
+*.env
+
+.vscode/*.json

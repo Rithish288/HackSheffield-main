@@ -1,0 +1,14 @@
+@import "tailwindcss";
+
+@tailwind utilities;
+
+/* Make pre blocks horizontally scrollable so long code lines don't break the layout */
+pre {
+	overflow-x: auto;
+	white-space: pre; /* preserve whitespace and let horizontal scroll appear */
+}
+
+/* Ensure code blocks wrap sensibly where appropriate but pre will handle large lines */
+code {
+	white-space: pre-wrap;
+}
