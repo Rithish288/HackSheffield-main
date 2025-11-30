@@ -14,7 +14,6 @@ export function MessageBubble({
   };
 }) {
   const isMe = message.sender === "me";
-  console.log(message);
   
   return (
     <div
